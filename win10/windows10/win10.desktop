@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Win10VM
+Comment=Run vm Ubuntu
+Exec=win10vm
+Icon=/bhyve/win10/windows10/win10.png
+Terminal=false
+Type=Application
+StartupNotify=true
+Categories=System;
+Name[ru_RU]=Win10VM
