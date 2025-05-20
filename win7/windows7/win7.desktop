@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Win7VM
+Comment=Run vm Ubuntu
+Exec=win7vm
+Icon=/home/definitly/2TB/vm/win7/windows7/win7.png
+Terminal=false
+Type=Application
+StartupNotify=true
+Categories=System;
+Name[ru_RU]=Win7VM

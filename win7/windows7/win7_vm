@@ -1,0 +1,470 @@
+#!/bin/sh
+
+GUEST_ROOT=/home/definitly/2TB/vm/win7
+CONF_DIR=/usr/local/etc/win7
+
+: "${IFCONFIG:=/sbin/ifconfig}"
+: "${GREP:=/usr/bin/grep}"
+: "${GRUB_BHYVE:=/usr/local/sbin/grub-bhyve}"
+: "${BHYVE:=/usr/sbin/bhyve}"
+: "${SED:=/usr/bin/sed}"
+: "${ECHO:=/bin/echo}"
+: "${DAEMON:=/usr/sbin/daemon}"
+: "${ROUTE:=/sbin/route}"
+: "${PFCTL:=/sbin/pfctl}"
+: "${SYSCTL:=/sbin/sysctl}"
+: "${KLDSTAT:=/sbin/kldstat}"
+: "${TAIL:=/usr/bin/tail}"
+: "${HEAD:=/usr/bin/head}"
+: "${KLDLOAD:=/sbin/kldload}"
+: "${KLDUNLOAD:=/sbin/kldunload}"
+: "${KILL:=/bin/kill}"
+: "${PGREP:=/bin/pgrep}"
+: "${TOUCH:=/usr/bin/touch}"
+: "${SHA256:=/sbin/sha256sum}"
+: "${TAR:=/usr/bin/tar}"
+: "${RM:=/bin/rm}"
+: "${TRUNCATE:=/usr/bin/truncate}"
+: "${MDCONFIG:=/sbin/mdconfig}"
+: "${GPART:=/sbin/gpart}"
+: "${RESIZE2FS:=/usr/local/sbin/resize2fs}"
+: "${E2FSCK:=/usr/local/sbin/e2fsck}"
+: "${FILE:=/usr/bin/file}"
+: "${AWK:=/usr/bin/awk}"
+: "${FETCH:=/usr/bin/fetch}"
+: "${INSTALL:=/usr/bin/install}"
+
+: "${TAP_ID:=/var/run/win7_tap_id}"
+: "${CAT:=/bin/cat}"
+
+
+: "${VMM_KO:=/boot/kernel/vmm.ko}"
+: "${PF_KO:=/boot/kernel/pf.ko}"
+: "${PF_CONF:=/etc/pf.conf}"
+
+DOCKERBOX_IF=bridge0
+DOCKERBOX_VM=win7
+DOCKERBOX_LOG=/var/log/win7.log
+DISK_IMAGE="${GUEST_ROOT}/disk.img"
+DOCKER_IMAGE="${GUEST_ROOT}/disk.img"
+DEVICE_MAP="${GUEST_ROOT}/device.map"
+VM_MANAGER_DAEMON_ID="win7-vm-manager"
+CONFIG="${CONF_DIR}/win7.conf"
+NAT_IP="10.0.0.254"
+UEFI=/usr/local/share/uefi-firmware/BHYVE_UEFI.fd
+help_msg="Usage: sudo dockerbox [command]
+
+command:
+start		start dockerbox
+stop		stop dockerbox
+console		start dockerbox and connect to console
+status		show dockerbox status
+resize [size] 	extend docker image with size of [size]
+"
+
+
+
+if [ ! -f "${CONFIG}" ]; then
+    echo "Файл $FILE не существует"
+
+  mkdir -p ${CONF_DIR}
+ cp  ubuntu.conf  ${CONF_DIR}
+
+fi
+
+
+
+
+log() {
+    local _level="$1"
+    local _message="$2"
+    local _timestamp
+
+    _level="$(${ECHO} $_level | tr "[:lower:]" "[:upper:]")"
+    _timestamp="$(date +'%FT%H:%M:%S%z')"
+    ${ECHO} "${_timestamp} ${_level} ${_message}" >> ${DOCKERBOX_LOG}
+}
+
+output() {
+    local _message="$1"
+
+    log info "Output: ${_message}"
+    ${ECHO} "${_message}."
+}
+
+capture_output() {
+    local _type="$1"
+    local _id="$2"
+
+    while read -r message; do
+        log "${_type}" "[${_id}] ${message}"
+    done
+}
+
+sysctl_value() {
+    ${SYSCTL} -nq "$1"
+}
+
+check_configuration() {
+    local _file="$1"
+
+    if [ ! -f "${_file}" ]; then
+    	log error "${_file} is missing, please create it from the sample"
+	    exit 3
+    fi
+}
+
+has_bridge_interface() {
+    ${IFCONFIG} | ${GREP} -Fq "${DOCKERBOX_IF}: "
+}
+
+get_tap_interface() {
+    if has_bridge_interface; then
+        ${IFCONFIG} "${DOCKERBOX_IF}" | ${GREP} -F member | ${SED} -E 's/^.*member:.*(tap[^ ]*).*$/\1/' | head -1
+    else
+        ${ECHO} ""
+    fi
+}
+
+
+get_tap_id() {
+
+       ${CAT}   ${TAP_ID} 
+}
+
+
+
+check_ext_if() {
+    . ${CONFIG}
+    ${IFCONFIG} | ${GREP} ${ext_if} -c
+}
+
+assert_kmod_loaded() {
+    local _kmod="$1"
+    local _kmod_file
+
+    if [ -n "$2" ]; then
+        _kmod_file="$2"
+    else
+        _kmod_file="${_kmod}"
+    fi
+
+    log debug "assert loaded: kmod=${_kmod}, kmod_file=${_kmod_file}"
+
+    if ! ${KLDSTAT} -q -m "${_kmod}"; then
+        log debug "Kernel module ${_kmod} is not loaded"
+
+        if ! (${KLDLOAD} "${_kmod_file}" 2>&1 | capture_output debug kldload); then
+            log error "${_kmod_file} kernel module could not be loaded"
+            exit 127
+        fi
+
+        log debug "Kernel module ${_kmod} was loaded successfully"
+    fi
+}
+
+nat_count() {
+    local _nat_keyword="$1"
+    local _ext_if="$2"
+    log debug "assert NAT loaded: nat_if=${_nat_keyword} ext_if=${_ext_if}"
+    ${PFCTL} -s nat | grep nat | grep ${_nat_keyword} | grep ${_ext_if} -c
+}
+
+check_pf() {
+    assert_kmod_loaded "pf" "${PF_KO}"
+
+    if [ ! $(${PFCTL} -s Running) == "Enabled" ]; then
+        log info "Enabling PF"
+        ${PFCTL} -e
+    fi
+
+    if [ ! -f "${PF_CONF}" ]; then
+	    log warn "No pf configuration found"
+	    log info "Creating empty pf configuration ${PF_CONF}"
+        ${TOUCH} ${PF_CONF}
+    fi
+    check_configuration ${CONFIG}
+
+    nat_ip=${NAT_IP}
+    nat_mask=24
+
+    log info "Pulling options from configuration file"
+    . ${CONFIG}
+
+    nat_keyword="$(echo ${nat_ip} | cut -d'.' -f1-3).0/${nat_mask}"
+
+    if [ $(nat_count ${nat_keyword} ${ext_if}) -lt 1 ]; then
+        log warn "No pf NAT set up"
+        if [ $(check_ext_if) -lt 1 ]; then
+            log warn "External interface specified in settings not available"
+        else
+            log info "Writing NAT rule into ${PF_CONF}"
+            ${ECHO} "nat on ${ext_if} inet from ${nat_keyword} to any -> (${ext_if})" >> ${PF_CONF}
+	        log info "Loading pf conf ${PF_CONF}"
+            ${PFCTL} -f ${PF_CONF} 
+	        if [ $(nat_count ${nat_keyword} ${ext_if}) -lt 1 ]; then
+		        log warn "Failed to load pf NAT with ${PF_CONF}"
+	        fi
+        fi
+    fi
+}
+
+create_bridge() {
+    if ! has_bridge_interface; then
+        log info "Creating bridge interface: ${DOCKERBOX_IF}"
+        ${IFCONFIG} bridge create name ${DOCKERBOX_IF} up 2>&1 | capture_output debug ifconfig
+    else
+        log warn "Bridge interface already exists: ${DOCKERBOX_IF}, skipping creation"
+    fi
+
+    check_configuration ${CONFIG}
+    
+    nat_ip=${NAT_IP}
+    nat_mask=24
+
+    log info "Pulling options from configuration file"
+    . ${CONFIG}
+
+    ${IFCONFIG} ${DOCKERBOX_IF} inet ${nat_ip}/${nat_mask} 2>&1 | capture_output debug ifconfig
+}
+
+destroy_bridge() {
+    if [ has_bridge_interface ]; then
+        log info "Destroying bridge interface: ${DOCKERBOX_IF}"
+        ${IFCONFIG} ${DOCKERBOX_IF} destroy 2>&1 | capture_output debug ifconfig
+    fi
+}
+
+create_tap() {
+ #   local _tap="$(get_tap_interface)"
+
+    if [ -z "${_tap}" ]; then
+        _tap="$(${IFCONFIG} tap create up)"
+        log info "Linking tap interface to ${DOCKERBOX_IF}: ${_tap}"
+        ${IFCONFIG} ${DOCKERBOX_IF} addm "${_tap}" 2>&1 | capture_output debug ifconfig
+        ${ECHO} "${_tap}"  >     ${TAP_ID}
+    else
+        log warn "Linked tap interface already exists: ${_tap}, skipping creation"
+    fi
+}
+
+destroy_tap() {
+    local _tap="$(get_tap_id)" 
+   # local _tap="$(get_tap_interface)"
+
+    if [ -n "${_tap}" ]; then
+        log info "Destroying linked tap interface: ${_tap}"
+        ${IFCONFIG} ${_tap} destroy 2>&1 | capture_output debug ifconfig
+    fi
+}
+
+check_nat() {
+    local _tap
+
+    if [ $(sysctl_value net.inet.ip.forwarding) -eq 0 ]; then
+        ${SYSCTL} net.inet.ip.forwarding=1 | capture_output debug sysctl
+    fi
+ #   create_bridge
+     create_tap
+ #   check_pf
+}
+
+get_kmod_path() {
+    local _kmod="$1"
+    ${KLDSTAT} -v -n "${_kmod}" | ${TAIL} +2 | ${HEAD} -1 | ${SED} -e 's![^(]*(\([^)]*\))!\1!'
+}
+
+check_vmm() {
+    local _kmod_path
+
+    if ${KLDSTAT} -q -m vmm; then
+        _kmod_path="$(get_kmod_path vmm)"
+        log info "vmm.ko is expected at path: ${VMM_KO}"
+        log info "vmm.ko is found at path: ${_kmod_path}"
+
+        if [ "${_kmod_path}" != "${VMM_KO}" ] && ! ${KLDUNLOAD} vmm; then
+            log error "vmm.ko is loaded from a different location, but cannot be replaced"
+            exit 127
+        fi
+    fi
+    
+    assert_kmod_loaded "vmm" "${VMM_KO}"
+}
+
+get_vm_manager_pid() {
+    ${PGREP} -fx "daemon: ${VM_MANAGER_DAEMON_ID}\[[0-9]*\]"
+}
+
+vm_manager() {
+    local _tap
+    local _grub_args
+    local _bhyve_args
+
+    log info "Starting dockerbox"
+
+    check_configuration ${CONFIG}
+    
+    cpu=1
+    memory=6G
+
+    log info "Pulling options from configuration file"
+    . ${CONFIG}
+
+#    check_vmm
+     check_nat 
+
+echo start
+
+    if [ ! -f ${DISK_IMAGE} ] || [ ! -f ${DEVICE_MAP} ]; then
+	  	log error "Disk image not installed"
+		log info "Please run 'service dockerbox fetch'"
+		exit 1
+	fi
+
+#    _tap="$(get_tap_interface)"
+     _tap="$(get_tap_id)"
+#    _grub_args="-m ${DEVICE_MAP} -r hd0,msdos1 -M ${memory}"
+    _bhyve_args="-w -H  -s 0:0,hostbridge -s 1:0,lpc -s 10:0,virtio-net,${_tap}  -s 5,fbuf,tcp=0.0.0.0:5900,"w=1918,h=1058"  -s 3:0,ahci-hd,${DISK_IMAGE} -l bootrom,$UEFI -c ${cpu} -m ${memory}"
+    
+    if [ "$1" == "console" ]; then
+        _bhyve_args="${_bhyve_args} -l com1,stdio"
+        log debug "Grub arguments: ${_grub_args}"
+ #       ${GRUB_BHYVE} ${_grub_args} ${DOCKERBOX_VM}
+        log debug "Bhyve arguments: ${_bhyve_args}"
+        ${BHYVE} ${_bhyve_args} ${DOCKERBOX_VM} 
+    else
+        log debug "Grub arguments: ${_grub_args}"
+ #       ${GRUB_BHYVE} ${_grub_args} ${DOCKERBOX_VM} 2>&1 | capture_output debug grub-bhyve  
+        log debug "Bhyve arguments: ${_bhyve_args}"
+        ${BHYVE} ${_bhyve_args} ${DOCKERBOX_VM} 2>&1 | capture_output debug bhyve
+    fi
+}
+
+dockerbox_start() {
+    local _run_console
+    local _pid
+
+    _run_console="$1"
+    _pid="$(get_vm_manager_pid)"
+
+    if [ -n "${_pid}" ]; then
+	    log warn "Guest is already run by PID ${_pid}, left intact"
+	    return 1
+    fi
+
+    if [ "${_run_console}" == "console" ]; then
+        log info "dockerbox_start: console mode"
+        vm_manager console
+    else
+        log info "dockerbox_start: normal mode"
+        ${DAEMON} -r -t "${VM_MANAGER_DAEMON_ID}" "${0}" _manage_vm
+    fi
+}
+
+dockerbox_stop() {
+    local _pid
+    _pid="$(get_vm_manager_pid)"
+    log info "Stopping guest ${DOCKERBOX_VM}, managed by PID ${_pid}"
+    ${KILL} -SIGTERM "${_pid}" 2>&1 | capture_output debug kill
+    bhyvectl --destroy --vm=${DOCKERBOX_VM}
+     destroy_tap
+#    destroy_bridge
+    ${KILL} -SIGTERM $PPID
+    log info "Dockerbox stopped: killed pid=${_pid} and ppid=${PPID}"
+}
+
+dockerbox_status() {
+    local _pid
+
+    log info "Begin: dockerbox status"
+
+    _pid="$(get_vm_manager_pid)"
+
+    if [ -n "${_pid}" ]; then
+	    output "dockerbox is running as pid ${_pid}"
+    else
+	    output "dockerbox is not running"
+	    return 1
+    fi
+
+    log info "End: dockerbox status"
+}
+
+dockerbox_resize() {
+	local partition
+	local part_index=1
+
+	if [ ! -f ${DOCKER_IMAGE} ]; then
+		log error "Docker image not found"
+		exit 1
+	fi
+
+	size=$(echo "$1" | egrep "[1-9][0-9]*[0-9]*[GgMm]")
+	if [ "$?" -ne 0 ]; then
+		log error "Invalid size argument"
+		exit 1
+	fi
+
+	log info "Docker image extending ${size}..."
+
+	${TRUNCATE} -s "+${size}" ${DOCKER_IMAGE}
+
+	mdev_name=$(${MDCONFIG} ${DOCKER_IMAGE})
+	partition="/dev/${mdev_name}s${part_index}"
+
+	if [ "$(${FILE} -s ${partition} | ${AWK} '{ print $5 }')" != "ext4" ]; then
+		log error "File system type mismatch"
+		exit 1
+	fi
+
+	${GPART} resize -a 4k -i ${part_index} /dev/${mdev_name}
+	${E2FSCK} -f ${partition}
+	${RESIZE2FS} ${partition}
+}
+
+dockerbox_fetch() {
+	DISK_IMG_SUM=559ea9e0061a36e840254c788e3795b4cc726a878a053146a4f2db72fae45143
+	DISKVERSION=0.2.0
+	DISKRELEASE=dockerbox-img-${DISKVERSION}
+	TMPDIR=/tmp
+
+	if [ -d ${GUEST_ROOT} ]; then
+		read -p "${GUEST_ROOT} exists. Overwrite? [y/n]: " yn
+		if [ $yn != "y" ]; then
+			echo "Abort"
+			exit
+		fi
+	fi
+
+	log debug "Fetch dockerbox disk imgage"
+	if [ $? -ne 0 ]; then exit 1; fi
+	${FETCH} -o ${TMPDIR} https://github.com/leafoliage/freebsd-dockerbox-debian/releases/download/v${DISKVERSION}/dockerbox-img-${DISKVERSION}.tar.zstd
+
+	tarball=${TMPDIR}/${DISKRELEASE}.tar.zstd
+	if [ "$(${SHA256} --quiet ${tarball})" != "${DISK_IMG_SUM}" ]; then
+		${RM} ${tarball}
+		log error "Dockerbox image checksum unmatch"
+		exit 1
+	fi
+	${TAR} -C ${TMPDIR} -xf ${tarball}
+	${INSTALL} -m 0644 ${TMPDIR}/${DISKRELEASE}/* ${GUEST_ROOT}
+	log info "Dockerbox disk image installed to ${GUEST_ROOT}"
+}
+
+#[ "$0" != "${SCRIPT}" ] && return 0
+
+#log debug "Program started as $0, with arguments: $*"
+
+command="$1"
+shift
+
+case ${command} in
+    start) dockerbox_start;;
+    stop) dockerbox_stop;;
+    console) dockerbox_start console;;
+    status) dockerbox_status;;
+    fetch) dockerbox_fetch;;
+    resize) dockerbox_resize $@;;
+    _manage_vm) vm_manager;;
+    *) echo "${help_msg}";;
+esac
