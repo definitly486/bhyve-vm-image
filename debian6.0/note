@@ -18,3 +18,6 @@ doas bhyve -AI -H -P -s 0:0,hostbridge -s 1:0,lpc -s 2:0,virtio-net,tap0 -s 3:0,
 doas /usr/local/sbin/grub-bhyve -r hd0 -m /home/definitly/debian6.0/device.map -M 1024 debian  < /home/definitly/debian6.0/grub.cfg > /dev/null
 doas bhyve -c 2 -A -H -P -s 0:0,hostbridge -s 1:0,lpc -s 2:0,virtio-net,tap0 -s 3:0,ahci-hd,/home/definitly/debian6.0/debian6.0.img -s 4:0,ahci-cd,/home/definitly/Downloads/debian-6.0.10-amd64-CD-1.iso  -c 4 -m 1024M debian
 doas bhyvectl --destroy --vm=debian
+
+
+ssh -oHostKeyAlgorithms=+ssh-dss vcore@192.168.8.106
