@@ -1,0 +1,11 @@
+doas /usr/local/sbin/grub-bhyve -r hd0 -m device.map -M 1024 suse  < grub.cfg
+doas bhyve -c 2 -A -H -P -s 0:0,hostbridge -s 1:0,lpc -s 2:0,virtio-net,tap0 -s 3:0,ahci-hd,/home/definitly/osuse11/suse.img -l com1,stdio -c 4 -m 1024M suse
+
+doas bhyve -AI -H -P -s 0:0,hostbridge -s 1:0,lpc -s 2:0,virtio-net,tap0 -s 3:0,ahci-hd,/home/definitly/osuse11/suse.img -s 4:0,ahci-cd,/home/definitly/Downloads/openSUSE-11.0-DVD-x86_64.iso -l com1,stdio -c 4 -m 1024M suse
+
+doas bhyvectl --destroy --vm=suse
+ssh -oHostKeyAlgorithms=+ssh-dss vcore@192.168.8.120
+
+
+linux   (cd0)/boot/x86_64/loader/linux
+initrd    (cd0)/boot/x86_64/loader/initrd
