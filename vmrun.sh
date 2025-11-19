@@ -2,6 +2,60 @@
 name=$1
 dir=$(dirname "$(realpath $0)")
 
+
+# Список дистрибутивов и операционных систем
+distros=(
+    alma
+    alpine
+    altlinux
+    android-blissos
+    antix19
+    arch
+    besgnulinux
+    bodhi
+    bunsen
+    cbpp
+    debian12
+    devuan
+    dockerbox
+    elementaryos
+    exegnu
+    fedora
+    lite
+    lubuntu14.04
+    lubuntu18.04
+    manjaro
+    mx
+    openbsd7.7
+    opensuse12
+    opensuse13
+    opensuse15
+    openwrt
+    puppy
+    ravynOS
+    sparky
+    ubuntu-mate14.04
+    ubuntu-mate14.10
+    ubuntu-waydroid
+    ubuntu12.04
+    ubuntu12.10
+    ubuntu14.04
+    ubuntu16.04
+    ubuntu18.04
+    ubuntu25.10
+    void
+    win10
+    win11
+    win7
+    win8
+)
+
+
+
+
+
+
+
 PCI_INTEL="pci0:0:2:0"
 PCI_NVIDIA="pci0:1:0:0"
 
@@ -9,9 +63,9 @@ PCI_GPU=$PCI_NVIDIA
 
 if ! pciconf -l $PCI_GPU | grep -q "ppt"; then
 echo "$PCI_GPU is not attached to ppt,attaching..."
-doas devctl detach $PCI_GPU
-doas devctl clear driver -f $PCI_GPU ppt
-doas devctl set driver -f $PCI_GPU ppt
+doas devctl detach $PCI_GPU > /dev/null 2>&1
+doas devctl clear driver -f $PCI_GPU ppt > /dev/null 2>&1
+doas devctl set driver -f $PCI_GPU ppt > /dev/null 2>&1
 else
 echo "$PCI_GPU already attached to ppt"
 fi
@@ -20,6 +74,10 @@ fi
 if [ -z "$1" ]
 then
      echo "введите название машины"
+     echo "список доступных систем"
+ for distro in "${distros[@]}"; do
+    echo "$distro"
+ done
      exit
 fi
 
