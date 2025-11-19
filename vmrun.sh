@@ -114,10 +114,6 @@ doas  ifconfig $IF up
 
 run_vm () {
 
-
-
-
-
 while true
 do
     doas  $BHYVE  \
