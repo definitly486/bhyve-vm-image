@@ -1,0 +1,1 @@
+openssl enc -aes-256-cbc -pbkdf2 -iter 100000 -d  -in  win22.zip.enc   -out win22.zip
